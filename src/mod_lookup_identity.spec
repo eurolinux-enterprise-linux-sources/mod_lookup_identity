@@ -7,7 +7,7 @@
 
 Summary: Apache module to retrieve additional information about the authenticated user
 Name: mod_lookup_identity
-Version: 0.9.5
+Version: 1.0.0
 Release: 1%{?dist}
 License: ASL 2.0
 Group: System Environment/Daemons
@@ -16,7 +16,6 @@ Source0: http://www.adelton.com/apache/mod_lookup_identity/%{name}-%{version}.ta
 BuildRequires: httpd-devel
 BuildRequires: dbus-devel
 BuildRequires: pkgconfig
-Requires(pre): httpd
 Requires: httpd-mmn = %{_httpd_mmn}
 
 # Suppres auto-provides for module DSO per
@@ -63,6 +62,23 @@ install -Dp -m 0644 lookup_identity.confx $RPM_BUILD_ROOT%{_httpd_confdir}/looku
 %{_httpd_moddir}/*.so
 
 %changelog
+* Tue Apr 04 2017 Jan Pazdziora <jpazdziora@redhat.com> - 1.0.0-1
+- Make LookupUserGECOS optional (no default) to support non-POSIX
+  user identities.
+
+* Wed Mar 22 2017 Jan Pazdziora <jpazdziora@redhat.com> - 0.9.9-1
+- Add support for multiple users mapped to single certificate.
+
+* Wed Nov 23 2016 Jan Pazdziora <jpazdziora@redhat.com> - 0.9.8-1
+- Logging improvements; lookup_user_by_certificate logging moved from
+  notice to info level.
+
+* Thu Jun 16 2016 Jan Pazdziora <jpazdziora@redhat.com> - 0.9.7-1
+- Ensure lookup_user_by_certificate runs after mod_nss as well.
+
+* Mon Mar 21 2016 Jan Pazdziora <jpazdziora@redhat.com> - 0.9.6-1
+- 1319138 - the Requires(pre) httpd does not seem to be needed.
+
 * Wed Jan 20 2016 Jan Pazdziora <jpazdziora@redhat.com> - 0.9.5-1
 - Fix LookupUserByCertificate httpd-2.2 compatibility issue.
 

@@ -1,6 +1,6 @@
 
 /*
- * Copyright 2013--2016 Jan Pazdziora
+ * Copyright 2013--2017 Jan Pazdziora
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,6 +27,7 @@
 #include "http_log.h"
 #include "http_protocol.h"
 #include "http_request.h"
+#include "util_script.h"
 #include <pwd.h>
 #include <grp.h>
 
@@ -38,7 +39,11 @@
 #define DBUS_SSSD_IFACE_USERS "org.freedesktop.sssd.infopipe.Users"
 #define DBUS_SSSD_GET_USER_GROUPS_METHOD "GetUserGroups"
 #define DBUS_SSSD_GET_USER_ATTR_METHOD "GetUserAttr"
+#ifndef NO_CERTIFICATE_MAPPING_SUPPORT
+#define DBUS_SSSD_FIND_BY_CERTIFICATE "FindByNameAndCertificate"
+#else
 #define DBUS_SSSD_FIND_BY_CERTIFICATE "FindByCertificate"
+#endif
 #define DBUS_SSSD_DEST "org.freedesktop.sssd.infopipe"
 #define DBUS_SSSD_TIMEOUT 5000
 #define DBUS_PROPERTIES "org.freedesktop.DBus.Properties"
@@ -55,12 +60,13 @@ static const int LOOKUP_IDENTITY_OUTPUT_ENV = 2;
 static const int LOOKUP_IDENTITY_OUTPUT_HEADERS = 4;
 static const int LOOKUP_IDENTITY_OUTPUT_HEADERS_BASE64 = 8;
 
-static char * LOOKUP_IDENTITY_OUTPUT_GECOS = "REMOTE_USER_GECOS";
-
 typedef struct lookup_identity_config {
 	char * context;
 	int output;
 	char * output_gecos;
+#ifndef NO_CERTIFICATE_MAPPING_SUPPORT
+	char * arg_name;
+#endif
 #ifndef NO_USER_ATTR
 	char * output_groups;
 	char * output_groups_sep;
@@ -81,13 +87,25 @@ static int lookup_user_by_certificate(request_rec * r) {
 	if (cfg->lookup_by_certificate < 1 || ! r->user) {
 		return DECLINED;
 	}
-	ap_log_error(APLOG_MARK, APLOG_INFO, 0, r->server, "lookup_user_by_certificate invoked [%s]", r->user);
+	ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "lookup_user_by_certificate invoked [%s]", r->user);
 
 	static char * stage = NULL;
 	DBusError error;
 	dbus_error_init(&error);
 	DBusMessage * message = NULL;
 	DBusMessage * reply = NULL;
+#ifndef NO_CERTIFICATE_MAPPING_SUPPORT
+	const char * username = "";
+	apr_table_t * arg_table = NULL;
+
+	if (cfg->arg_name) {
+		ap_args_to_table(r, &arg_table);
+		username = apr_table_get(arg_table, cfg->arg_name);
+		if (username == NULL) {
+			username = "";
+		}
+	}
+#endif
 
 	DBusConnection * connection = dbus_bus_get(DBUS_BUS_SYSTEM, &error);
 	if (! connection) {
@@ -106,6 +124,9 @@ static int lookup_user_by_certificate(request_rec * r) {
 	}
 	dbus_message_set_auto_start(message, TRUE);
 	if (! dbus_message_append_args(message,
+#ifndef NO_CERTIFICATE_MAPPING_SUPPORT
+		DBUS_TYPE_STRING, &username,
+#endif
 		DBUS_TYPE_STRING, &(r->user),
 		DBUS_TYPE_INVALID)) {
 		stage = apr_psprintf(r->pool, "dbus_message_append_args(%s)", r->user);
@@ -135,7 +156,7 @@ static int lookup_user_by_certificate(request_rec * r) {
 		goto fail;
 	}
 
-	ap_log_error(APLOG_MARK, APLOG_INFO, 0, r->server, "lookup_user_by_certificate got object [%s]", path);
+	ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "lookup_user_by_certificate got object [%s]", path);
 
 	dbus_message_unref(message);
 	message = dbus_message_new_method_call(DBUS_SSSD_DEST,
@@ -189,7 +210,7 @@ static int lookup_user_by_certificate(request_rec * r) {
 		char * r_data;
 		dbus_message_iter_get_basic(&variter, &r_data);
 		r->user = apr_pstrdup(r->pool, r_data);
-		ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, r->server, "lookup_user_by_certificate found [%s]", r->user);
+		ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "lookup_user_by_certificate found [%s]", r->user);
 	}
 	if (dbus_message_iter_next(&variter) || dbus_message_iter_next(&iter)) {
 		stage = DBUS_PROPERTIES "." DBUS_PROPERTIES_GET ": result is not unique";
@@ -200,15 +221,15 @@ static int lookup_user_by_certificate(request_rec * r) {
 
 fail:
 	if (dbus_error_is_set(&error)) {
-		ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server, "lookup_user_by_certificate failed [%s]: [%s]", stage, error.message);
+		ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "lookup_user_by_certificate failed [%s]: [%s]", stage, error.message);
 	} else if (stage) {
-		ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server, "lookup_user_by_certificate failed [%s]", stage);
+		ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "lookup_user_by_certificate failed [%s]", stage);
 	}
 	r->user = NULL;
 
 pass:
 	if (! r->user) {
-		ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server, "lookup_user_by_certificate cleared r->user");
+		ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "lookup_user_by_certificate cleared r->user");
 	}
 	if (reply) {
 		dbus_message_unref(reply);
@@ -227,7 +248,7 @@ static DBusMessage * lookup_identity_dbus_message(request_rec * r, DBusConnectio
 		DBUS_SSSD_IFACE,
 		method);
 	if (! message) {
-		ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server, "Error allocating dbus message");
+		ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "Error allocating dbus message");
 		return NULL;
 	}
 	dbus_message_set_auto_start(message, TRUE);
@@ -287,13 +308,13 @@ static DBusMessage * lookup_identity_dbus_message(request_rec * r, DBusConnectio
 			args_string[total_args_length] = '\0';
 		}
 		if (dbus_error_is_set(error)) {
-			ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server,
+			ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
 				"Error dbus calling %s(%s%s): %s: %s", method, user, args_string, error->name, error->message);
 		} else if (reply_type == DBUS_MESSAGE_TYPE_ERROR) {
-			ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server,
+			ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
 				"Error %s dbus calling %s(%s%s)", dbus_message_get_error_name(reply), method, user, args_string);
 		} else {
-			ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server,
+			ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
 				"Error unexpected reply type %d dbus calling %s(%s%s)", reply_type, method, user, args_string);
 		}
 		if (reply) {
@@ -421,14 +442,14 @@ static int lookup_identity_hook(request_rec * r) {
 		return DECLINED;
 	}
 
-	ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "invoked for user %s", r->user);
-
-	struct passwd * pwd = getpwnam(r->user);
-	if (! pwd) {
-		return DECLINED;
-	}
+	ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "invoked for user %s", r->user);
 
 	if (the_config->output_gecos) {
+		struct passwd * pwd = getpwnam(r->user);
+		if (! pwd) {
+			return DECLINED;
+		}
+
 		apr_array_header_t * gecos_array = apr_array_make(r->pool, 1, sizeof(char *));
 		*(char **)apr_array_push(gecos_array) = pwd->pw_gecos;
 		lookup_identity_output_data(r, the_output,
@@ -446,7 +467,7 @@ static int lookup_identity_hook(request_rec * r) {
 		dbus_error_init(&error);
 		DBusConnection * connection = dbus_bus_get(DBUS_BUS_SYSTEM, &error);
 		if (! connection) {
-			ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server,
+			ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
 				"Error connecting to system dbus: %s", error.message);
 		} else {
 			dbus_connection_set_exit_on_disconnect(connection, FALSE);
@@ -461,7 +482,7 @@ static int lookup_identity_hook(request_rec * r) {
 						values = apr_array_make(r->pool, num, sizeof(char *));
 					}
 					for (i = 0; i < num; i++) {
-						ap_log_error(APLOG_MARK, APLOG_INFO, 0, r->server,
+						ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
 							"dbus call %s returned group %s", DBUS_SSSD_GET_USER_GROUPS_METHOD, ptr[i]);
 						*(char **)apr_array_push(values) = ptr[i];
 					}
@@ -496,7 +517,7 @@ static int lookup_identity_hook(request_rec * r) {
 						do {
 							type = dbus_message_iter_get_arg_type(&iter);
 							if (type != DBUS_TYPE_DICT_ENTRY) {
-								ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server,
+								ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
 									"dbus call %s returned value %d instead of DBUS_TYPE_DICT_ENTRY",
 									DBUS_SSSD_GET_USER_ATTR_METHOD, type);
 								continue;
@@ -507,7 +528,7 @@ static int lookup_identity_hook(request_rec * r) {
 							dbus_message_iter_get_basic(&dictiter, &attr_name);
 							char * out_name = apr_hash_get(the_config->output_user_attr, attr_name, APR_HASH_KEY_STRING);
 							if (!out_name) {
-								ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server,
+								ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
 									"dbus call %s returned key %s that we did not ask for",
 									DBUS_SSSD_GET_USER_ATTR_METHOD, attr_name);
 								continue;
@@ -516,12 +537,12 @@ static int lookup_identity_hook(request_rec * r) {
 								apr_hash_set(seen, attr_name, APR_HASH_KEY_STRING, "");
 							}
 							if (! dbus_message_iter_next(&dictiter)) {
-								ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server,
+								ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
 									"dbus call %s returned key %s with no value", DBUS_SSSD_GET_USER_ATTR_METHOD, attr_name);
 							}
 							type = dbus_message_iter_get_arg_type(&dictiter);
 							if (type != DBUS_TYPE_VARIANT) {
-								ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server,
+								ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
 									"dbus call %s returned key %s which does not have DBUS_TYPE_VARIANT as value",
 									DBUS_SSSD_GET_USER_ATTR_METHOD, attr_name);
 								continue;
@@ -529,7 +550,7 @@ static int lookup_identity_hook(request_rec * r) {
 							dbus_message_iter_recurse(&dictiter, &dictiter);
 							type = dbus_message_iter_get_arg_type(&dictiter);
 							if (type != DBUS_TYPE_ARRAY) {
-								ap_log_error(APLOG_MARK, APLOG_ERR, 0, r->server,
+								ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
 									"dbus call %s returned key %s which does not have DBUS_TYPE_VARIANT DBUS_TYPE_ARRAY as value",
 									DBUS_SSSD_GET_USER_ATTR_METHOD, attr_name);
 								continue;
@@ -546,7 +567,7 @@ static int lookup_identity_hook(request_rec * r) {
 							do {
 								char * r_data;
 								dbus_message_iter_get_basic(&dictiter, &r_data);
-								ap_log_error(APLOG_MARK, APLOG_INFO, 0, r->server,
+								ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r,
 									"dbus call %s returned attr %s=%s", DBUS_SSSD_GET_USER_ATTR_METHOD, attr_name, r_data);
 								if (! values) {
 									values = apr_array_make(r->pool, 1, sizeof(char *));
@@ -662,7 +683,7 @@ static lookup_identity_config * create_common_conf(apr_pool_t * pool) {
 	lookup_identity_config * cfg = apr_pcalloc(pool, sizeof(lookup_identity_config));
 	if (cfg) {
 		cfg->output = LOOKUP_IDENTITY_OUTPUT_DEFAULT;
-		cfg->output_gecos = LOOKUP_IDENTITY_OUTPUT_GECOS;
+		cfg->output_gecos = NULL;
 #ifndef NO_USER_ATTR
 		cfg->lookup_by_certificate = -1;
 #endif
@@ -692,6 +713,9 @@ static void * merge_dir_conf(apr_pool_t * pool, void * base_void, void * add_voi
 	lookup_identity_config * cfg = (lookup_identity_config *) create_dir_conf(pool, add->context);
 	cfg->output = (add->output == LOOKUP_IDENTITY_OUTPUT_DEFAULT) ? base->output : add->output;
 	cfg->output_gecos = add->output_gecos ? add->output_gecos : base->output_gecos;
+#ifndef NO_CERTIFICATE_MAPPING_SUPPORT
+	cfg->arg_name = add->arg_name ? add->arg_name : base->arg_name;
+#endif
 #ifndef NO_USER_ATTR
 	cfg->output_groups = add->output_groups ? add->output_groups : base->output_groups;
 	cfg->output_groups_sep = add->output_groups_sep ? add->output_groups_sep : base->output_groups_sep;
@@ -732,6 +756,9 @@ static void * merge_dir_conf(apr_pool_t * pool, void * base_void, void * add_voi
 static const command_rec directives[] = {
 	AP_INIT_TAKE1("LookupOutput", set_output, NULL, RSRC_CONF | ACCESS_CONF, "Specify where the lookup results should be stored (notes, variables, headers)"),
 	AP_INIT_TAKE1("LookupUserGECOS", ap_set_string_slot, (void*)APR_OFFSETOF(lookup_identity_config, output_gecos), RSRC_CONF | ACCESS_CONF, "Name of the note/variable for the GECOS information"),
+#ifndef NO_CERTIFICATE_MAPPING_SUPPORT
+	AP_INIT_TAKE1("LookupUserByCertificateParamName", ap_set_string_slot, (void*)APR_OFFSETOF(lookup_identity_config, arg_name), RSRC_CONF | ACCESS_CONF, "Name of the argument/variable in query string used to pass username"),
+#endif
 #ifndef NO_USER_ATTR
 	AP_INIT_TAKE12("LookupUserGroups", set_output_groups, NULL, RSRC_CONF | ACCESS_CONF, "Name of the note/variable for the group information"),
 	AP_INIT_TAKE1("LookupUserGroupsIter", ap_set_string_slot, (void*)APR_OFFSETOF(lookup_identity_config, output_groups_iter), RSRC_CONF | ACCESS_CONF, "Name of the notes/variables for the group information"),
@@ -746,7 +773,7 @@ static const command_rec directives[] = {
 static void register_hooks(apr_pool_t * pool) {
 #ifndef NO_USER_ATTR
 	static const char * const access_succ[] = {"mod_authz_core.c", NULL};
-	static const char * const access_pred[] = {"mod_ssl.c", NULL};
+	static const char * const access_pred[] = {"mod_ssl.c", "mod_nss.c", NULL};
 #ifdef AP_AUTH_INTERNAL_PER_CONF
 	ap_hook_check_access(lookup_user_by_certificate, access_pred, access_succ, APR_HOOK_MIDDLE,
 					AP_AUTH_INTERNAL_PER_CONF);
@@ -760,7 +787,12 @@ static void register_hooks(apr_pool_t * pool) {
 	APR_REGISTER_OPTIONAL_FN(lookup_identity_hook);
 }
 
-module AP_MODULE_DECLARE_DATA lookup_identity_module = {
+#ifdef AP_DECLARE_MODULE
+AP_DECLARE_MODULE(lookup_identity)
+#else
+module AP_MODULE_DECLARE_DATA lookup_identity_module
+#endif
+	= {
 	STANDARD20_MODULE_STUFF,
 	create_dir_conf,		/* Per-directory configuration handler */
 	merge_dir_conf,			/* Merge handler for per-directory configurations */

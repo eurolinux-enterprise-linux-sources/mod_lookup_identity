@@ -7,7 +7,7 @@
 
 Summary: Apache module to retrieve additional information about the authenticated user
 Name: mod_lookup_identity
-Version: 0.9.5
+Version: 1.0.0
 Release: 1%{?dist}
 License: ASL 2.0
 Group: System Environment/Daemons
@@ -16,7 +16,6 @@ Source0: http://www.adelton.com/apache/mod_lookup_identity/%{name}-%{version}.ta
 BuildRequires: httpd-devel
 BuildRequires: dbus-devel
 BuildRequires: pkgconfig
-Requires(pre): httpd
 Requires: httpd-mmn = %{_httpd_mmn}
 
 # Suppres auto-provides for module DSO per
@@ -63,6 +62,15 @@ install -Dp -m 0644 lookup_identity.confx $RPM_BUILD_ROOT%{_httpd_confdir}/looku
 %{_httpd_moddir}/*.so
 
 %changelog
+* Thu Apr 06 2017 Jan Pazdziora <jpazdziora@redhat.com> - 1.0.0-1
+- 1436733 - Rebase to upstream release 1.0.0 to get non-POSIX user support.
+
+* Wed Mar 22 2017 Tibor Dudlák <tdudlak@redhat.com> - 0.9.9-1
+- Rebase to upstream release 0.9.9.
+
+* Mon Mar 13 2017 Tibor Dudlák <tdudlak@redhat.com> - 0.9.8-1
+- Rebase to upstream release 0.9.8.
+
 * Wed Jan 20 2016 Jan Pazdziora <jpazdziora@redhat.com> - 0.9.5-1
 - Fix LookupUserByCertificate httpd-2.2 compatibility issue.
 
